@@ -245,7 +245,7 @@
 
         <div class="card">
             <h2>表名知识库（Hive↔CK）</h2>
-            <p class="hint" style="margin-bottom: 12px;">默认与同目录下 <code>表名称转化的知识库.csv</code>（列：CK表名称, HIVE 表名称）联动。也可上传覆盖。加载后：① 相关行会并入大模型提示；② 转换结束会按知识库再做一轮表名替换；③ 加载知识库时将关闭易改错表的 <code>_hive_</code> 粗暴替换，仅保留库名 dwd/ods/ads → bi_app。</p>
+            <p class="hint" style="margin-bottom: 12px;">默认与同目录下 <code>表名称转化的知识库.csv</code>（列：CK表名称, HIVE 表名称）联动。也可上传覆盖。<strong>命中知识库时表名以 CSV 为准</strong>；未命中时再按页面规则：CK→Hive 在 <code>zdm_</code> 后补 <code>hive_</code>，Hive→CK 去 <code>_hive_</code>，库名 CK 用 <code>bi_app</code>、Hive 用表名中第一个 <code>zdm</code> 前缀。</p>
             <div class="select-row" style="align-items: center;">
                 <input type="file" id="kbCsvFile" accept=".csv,text/csv" onchange="loadKbFromFile(event)" style="color:var(--text-muted);">
                 <span id="kbStatus" class="hint" style="margin:0;">正在尝试加载知识库…</span>
@@ -301,10 +301,12 @@
         <div class="rules">
             <h3>转换规则说明</h3>
             <ul>
-                <li><strong>Hive ↔ CK：</strong> 调用大模型转换（函数差异大，无法枚举）。若已加载 <code>表名称转化的知识库.csv</code>，表名以知识库为准并在提示与后处理中生效；未加载时仍用规则：Hive→CK 库改 bi_app、<code>_hive_</code> 段替换；CK→Hive 库改 dwd_zdm、ads_zdm_ 改 dwd_zdm_hive_</li>
-                <li><strong>Hive → 达芬奇：</strong> 先经大模型转为 CK，再应用库表名规则与达芬奇变量规则（时间自动处理，筛选项需填写字段名）</li>
-                <li><strong>CK → 达芬奇：</strong> 仅规则处理。时间条件自动转为 $begin_date$ / $end_date$（月格式用 substr）；筛选项需在上方填写字段名，转为 $if(字段名)$ and 字段名 in($字段名$) $endif$</li>
-                <li><strong>达芬奇 → Hive/CK：</strong> 变量替换为占位符后，若转 Hive 则再调大模型，并应用库表名规则（库改 dwd_zdm、表名加 hive）</li>
+                <li><strong>表名（知识库优先）：</strong>命中 CSV 则以知识库为准。未命中且 CK/达芬奇→Hive：<strong>①</strong> 首个 <code>zdm_</code> 改为 <code>zdm_hive_</code>（如 <code>ads_zdm_trade_orderproduct</code>→<code>ads_zdm_hive_trade_orderproduct</code>）；<strong>②</strong> 库名 = 表名中第一个 <code>zdm</code> 及之前字符（含 <code>zdm</code>），有 <code>_hive_</code> 时优先用其左侧段定库名，避免误把 <code>hive_zdm</code> 当库名；再拼成 <code>库名.表名</code>。Hive→CK/达芬奇：表名去 <code>_hive_</code>，库名 <code>bi_app</code>。</li>
+                <li><strong>库名规范：</strong>正确形式均为 <strong>库名.表名</strong>（仅<strong>一段</strong>库名、<strong>一段</strong>表名，中间<strong>一个点</strong>）。CK/达芬奇库名为 <code>bi_app</code>；Hive 库名为表名中第一个 <code>zdm</code> 及其前字符。<strong>最终输出前</strong>会统一执行一次表名收口：先按知识库替换（若已加载），再按上述规则去 <code>_hive_</code> / 补 <code>zdm_hive_</code>、合并误产生的多重库名、补全裸表名；与大模型或纯规则路径无关，保证结果表名一致规范。若仍疑似「库.库.表」会在结果末尾用注释提示。</li>
+                <li><strong>CK / 达芬奇 — 表名以 <code>_a</code> 结尾：</strong>在 <code>FROM</code> / <code>JOIN</code>（含 <code>LEFT JOIN</code> 等）后的表引用后自动追加 <code>final</code>（如 <code>bi_app.ads_zdm_foo_a</code> → <code>bi_app.ads_zdm_foo_a final</code>）；已带 <code>final</code> 不重复。Hive 目标不追加（Hive 无此语法）。</li>
+                <li><strong>Hive → 达芬奇：</strong> 先经大模型转为 CK，再应用库表名与达芬奇变量规则。时间：<code>between</code>、<code>&gt;= AND &lt;=</code>、以及 <code>dt / order_create_date / statis_date / date = '日期'</code> 等号写法，会转为 <code>$begin_date$</code>/<code>$end_date$</code> 或 <code>substr(...,1,7)</code>；筛选项需在上方填写字段名</li>
+                <li><strong>CK → 达芬奇：</strong> 规范 <code>bi_app.表名</code> 后同上时间规则与筛选项变量</li>
+                <li><strong>达芬奇 → Hive/CK：</strong> 变量替换为占位符后，转 Hive 调大模型并套表名规则；转 CK 规范为 <code>bi_app</code></li>
             </ul>
         </div>
     </div>
@@ -396,7 +398,7 @@
             if (!rows.length) return '';
             const max = 100;
             const lines = rows.slice(0, max).map(r => r.hive + '\t' + r.ck);
-            let s = '\n【表名映射知识库】以下为当前 SQL 中可能涉及的 HIVE ↔ CK 表名权威对应，转换后的表名须与之一致（含库前缀时以左侧 Hive 全名为准改写为 CK 侧 bi_app 或 dm_zdm）。\n';
+            let s = '\n【表名映射知识库】命中时表名以本表为准；CK 侧一般为 bi_app.表名，Hive 侧为「库名.表名」（库名=表名中第一个 zdm 及之前部分）。未命中时再按页面规则补 zdm_hive 或去 _hive_。\n';
             s += lines.join('\n');
             if (rows.length > max) s += '\n（命中 ' + rows.length + ' 条，此处最多展示 ' + max + ' 条）';
             return s;
@@ -420,10 +422,46 @@
             return s;
         }
 
+        /**
+         * Hive 库名：取「zdm」前所有字符 +「zdm」= 第一个 zdm 段（含 zdm 三个字母）。
+         * CK→Hive 在 zdm_ 后已插入 hive_ 时，优先用 _hive_ 左侧整段作为库名，避免误匹配 hive_zdm 里的 zdm。
+         * 例：ads_zdm_hive_trade_orderproduct → ads_zdm；dm_zdm_hive_xxx → dm_zdm
+         */
+        function hiveSchemaFromBareTableName(bare) {
+            if (!bare || bare.indexOf('.') >= 0) return 'dwd_zdm';
+            if (/_hive_/i.test(bare)) {
+                const left = bare.split(/_hive_/i)[0];
+                const iz = left.indexOf('zdm');
+                if (iz >= 0) return left.slice(0, iz + 3);
+                return left || 'dwd_zdm';
+            }
+            const idx = bare.indexOf('zdm');
+            if (idx < 0) return 'dwd_zdm';
+            return bare.slice(0, idx + 3);
+        }
+
+        /**
+         * 未命中知识库：CK/达芬奇 裸表名 → 第一步将首个 zdm_ 改为 zdm_hive_（等价在 zdm_ 后增加 hive_）
+         * 例：ads_zdm_trade_orderproduct → ads_zdm_hive_trade_orderproduct
+         */
+        function ckBareToHiveBareNoKb(bare) {
+            if (!bare || bare.indexOf('.') >= 0) return bare;
+            if (/_hive_/i.test(bare)) return bare;
+            if (bare.indexOf('zdm_') < 0) return bare;
+            return bare.replace(/zdm_/, 'zdm_hive_');
+        }
+
+        /** 未命中知识库：Hive 裸表名 → 去掉表名中的 _hive_（单段内） */
+        function hiveBareToCkBareNoKb(bare) {
+            if (!bare || bare.indexOf('.') >= 0) return bare;
+            return bare.replace(/_hive_/g, '_');
+        }
+
         function qualifyHiveFromRow(r) {
             if (r.hive.indexOf('.') >= 0) return r.hive;
-            if (r.ck.indexOf('dm_zdm') === 0) return 'dm_zdm.' + r.hive;
-            return 'dwd_zdm.' + r.hive;
+            const schema = hiveSchemaFromBareTableName(r.hiveBare);
+            if (r.hive === schema) return r.hive;
+            return schema + '.' + r.hive;
         }
 
         function applyKbCkToHive(sql) {
@@ -448,6 +486,155 @@
                     s = s.replace(re, qual);
                 }
             }
+            return s;
+        }
+
+        /**
+         * 规范应为「库名.表名」两段，仅一个点。误出现三层 dwd_zdm.ads_zdm.ads_zdm_hive_xxx 或
+         * bi_app.ads_zdm.ads_zdm_hive_xxx 时，去掉多余前缀段（当中间库名与表名前缀重复时）。
+         */
+        function fixTripleQualifiedTableNames(sql) {
+            if (!sql) return sql;
+            let s = sql;
+            let prev = '';
+            while (s !== prev) {
+                prev = s;
+                s = s.replace(/\bdwd_zdm\.(\w+)\.(\1_[a-zA-Z0-9_]*)\b/g, '$1.$2');
+                s = s.replace(/\bods_zdm\.(\w+)\.(\1_[a-zA-Z0-9_]*)\b/g, '$1.$2');
+                s = s.replace(/\bbi_app\.(\w+)\.(\1_[a-zA-Z0-9_]*)\b/gi, 'bi_app.$2');
+            }
+            return s;
+        }
+
+        /** 检测是否仍存在「库.库.表」形式（表名以第二段库名+下划线开头） */
+        function findTripleQualifiedTableIssues(sql) {
+            if (!sql) return [];
+            const bad = [];
+            const re = /\b(?:dwd_zdm|ods_zdm|bi_app)\.(\w+)\.(\w+)\b/gi;
+            let m;
+            const seen = new Set();
+            while ((m = re.exec(sql)) !== null) {
+                const mid = m[1];
+                const third = m[2];
+                if (third.length > mid.length + 1 && third.slice(0, mid.length + 1) === mid + '_') {
+                    const key = m[0];
+                    if (!seen.has(key)) {
+                        seen.add(key);
+                        bad.push(key);
+                    }
+                }
+            }
+            return bad;
+        }
+
+        /** 合并误产生的两重库名；并修正 CK→Hive 遗留的 dwd_zdm.dm_zdm.xxx → dm_zdm.xxx */
+        function collapseDuplicateSchemaPrefix(sql) {
+            if (!sql) return sql;
+            const schemas = ['dwd_zdm', 'ods_zdm', 'ads_zdm', 'dm_zdm', 'bi_app'];
+            let s = sql;
+            let prev = '';
+            while (s !== prev) {
+                prev = s;
+                for (const sch of schemas) {
+                    s = s.replace(new RegExp('\\b' + sch + '\\.' + sch + '\\.', 'gi'), sch + '.');
+                }
+            }
+            prev = '';
+            while (s !== prev) {
+                prev = s;
+                s = s.replace(/\bdwd_zdm\.dm_zdm\./g, 'dm_zdm.');
+            }
+            s = fixTripleQualifiedTableNames(s);
+            return s;
+        }
+
+        /**
+         * CK：表名（最后一段标识符）以 _a 结尾时，在 FROM/JOIN 后的表引用后追加 ` final`（ReplacingMergeTree 等去重语义）。
+         * 已带 ` final` 的不重复追加；Hive 目标不调用本函数。
+         */
+        function appendFinalForTableSuffixA(sql) {
+            if (!sql) return sql;
+            let s = sql;
+            const joinFrom = '(?:FROM|(?:LEFT|RIGHT|INNER|FULL|CROSS|SEMI|ANTI|ANY|ASOF|GLOBAL)\\s+JOIN|JOIN)\\s+';
+            const reQual = new RegExp('\\b(' + joinFrom + ')([a-zA-Z_][a-zA-Z0-9_]*\\.[a-zA-Z_][a-zA-Z0-9_]*_a)\\b(?!\\s+final\\b)', 'gi');
+            s = s.replace(reQual, function (_m, prefix, tbl) {
+                return prefix + tbl + ' final';
+            });
+            const reBare = new RegExp('\\b(' + joinFrom + ')([a-zA-Z_][a-zA-Z0-9_]*_a)\\b(?!\\s+final\\b)', 'gi');
+            s = s.replace(reBare, function (m, prefix, tbl) {
+                if (/^(from|join|where|select|group|order|having|union|and|or)$/i.test(tbl)) return m;
+                return prefix + tbl + ' final';
+            });
+            return s;
+        }
+
+        /**
+         * 最终表名规范化（所有路径结束前必须调用一次）。
+         * 知识库优先：与 applyKb* + *TableRules 顺序一致；再合并误产生的多重库名、补全裸表。
+         * 达芬奇目标与 CK 使用相同物理表名，故 target 为 davinci 时按 ck 处理。
+         */
+        function finalizeSqlTableNames(sql, targetFormat) {
+            if (!sql) return sql;
+            const t = targetFormat === 'davinci' ? 'ck' : targetFormat;
+            if (t === 'hive') {
+                let s = sql;
+                s = applyKbCkToHive(s);
+                s = ckToHiveTableRules(s);
+                s = collapseDuplicateSchemaPrefix(s);
+                s = ensureQualifyBareTables(s, 'hive');
+                return s;
+            }
+            if (t === 'ck') {
+                let s = sql;
+                s = applyKbHiveToCk(s);
+                s = hiveToCkTableRules(s);
+                s = collapseDuplicateSchemaPrefix(s);
+                s = ensureQualifyBareTables(s, 'ck');
+                s = appendFinalForTableSuffixA(s);
+                return s;
+            }
+            return sql;
+        }
+
+        /** 无库名时补全：CK → bi_app.表名；Hive → (zdm 前缀).表名 */
+        function ensureQualifyBareTables(sql, mode) {
+            if (!sql || (mode !== 'hive' && mode !== 'ck')) return sql;
+            const kw = new Set([
+                'select', 'where', 'group', 'order', 'having', 'union', 'inner', 'left', 'right', 'cross', 'full', 'join', 'on', 'using', 'asc', 'desc', 'limit', 'offset', 'case', 'when', 'then', 'else', 'end', 'and', 'or', 'not', 'null', 'true', 'false', 'as', 'by', 'with', 'except', 'intersect', 'all', 'distinct', 'over', 'partition', 'between', 'in', 'exists', 'like', 'rlike', 'some', 'any', 'from', 'into', 'table', 'insert', 'update', 'delete', 'values', 'set', 'grant', 'revoke', 'outer', 'natural', 'lateral', 'window', 'qualify', 'fetch', 'only', 'rows', 'range', 'preceding', 'following', 'unbounded', 'current', 'row'
+            ]);
+
+            function qualify(name) {
+                if (!name || name.indexOf('.') >= 0) return null;
+                if (kw.has(name.toLowerCase())) return null;
+                if (!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(name)) return null;
+                if (mode === 'ck') return 'bi_app.' + name;
+                const sch = hiveSchemaFromBareTableName(name);
+                if (name === sch) return null;
+                return sch + '.' + name;
+            }
+
+            function patchBare(re, s, nameIndex) {
+                return s.replace(re, function (m) {
+                    const offset = arguments[arguments.length - 2];
+                    const str = arguments[arguments.length - 1];
+                    const name = arguments[nameIndex];
+                    const afterMatch = str.slice(offset + m.length);
+                    if (/^\s*\./.test(afterMatch)) return m;
+                    const q = qualify(name);
+                    if (!q) return m;
+                    if (/^\s*\(/i.test(afterMatch)) return m;
+                    const esc = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+                    return m.replace(new RegExp(esc + '\\b(?!\\s*\\.)'), q);
+                });
+            }
+
+            // 已写成 库.表 时：第一段后紧跟 .（或空白+.）则不要当作裸表补库名；(?!\s*\.)
+            let s = sql;
+            s = patchBare(/\bFROM\s+([a-zA-Z_][a-zA-Z0-9_]*)(?!\s*\.)/gi, s, 1);
+            s = patchBare(/\b(?:(LEFT|RIGHT|INNER|FULL|CROSS)\s+)?JOIN\s+([a-zA-Z_][a-zA-Z0-9_]*)(?!\s*\.)/gi, s, 2);
+            s = patchBare(/\bINSERT\s+INTO\s+([a-zA-Z_][a-zA-Z0-9_]*)(?!\s*\.)/gi, s, 1);
+            s = patchBare(/\bUPDATE\s+([a-zA-Z_][a-zA-Z0-9_]*)(?!\s*\.)/gi, s, 1);
+            s = collapseDuplicateSchemaPrefix(s);
             return s;
         }
 
@@ -528,32 +715,34 @@
             try {
                 let result = input;
 
-                const kb = TABLE_KB.loaded;
                 if (sourceFormat === SOURCE.HIVE && targetFormat === TARGET.CK) {
                     result = await callLLM(input, 'hive', 'ck');
-                    result = applyKbHiveToCk(result);
-                    result = hiveToCkTableRules(result, { kbLoaded: kb });
+                    result = finalizeSqlTableNames(result, 'ck');
                 } else if (sourceFormat === SOURCE.HIVE && targetFormat === TARGET.DAVINCI) {
                     result = await callLLM(input, 'hive', 'ck');
-                    result = applyKbHiveToCk(result);
-                    result = hiveToCkTableRules(result, { kbLoaded: kb });
+                    result = finalizeSqlTableNames(result, 'ck');
                     result = ckToDavinciRules(result);
                 } else if (sourceFormat === SOURCE.CK && targetFormat === TARGET.HIVE) {
                     result = await callLLM(input, 'ck', 'hive');
                     result = fixHiveCkFunctions(result);
-                    result = applyKbCkToHive(result);
-                    result = ckToHiveTableRules(result, { kbLoaded: kb });
+                    result = finalizeSqlTableNames(result, 'hive');
                 } else if (sourceFormat === SOURCE.CK && targetFormat === TARGET.DAVINCI) {
-                    result = hiveToCkTableRules(input, { kbLoaded: kb });
+                    result = finalizeSqlTableNames(input, 'ck');
                     result = ckToDavinciRules(result);
                 } else if (sourceFormat === SOURCE.DAVINCI && targetFormat === TARGET.HIVE) {
                     result = davinciReplaceVars(input);
                     result = await callLLM(result, 'ck', 'hive');
                     result = fixHiveCkFunctions(result);
-                    result = applyKbCkToHive(result);
-                    result = ckToHiveTableRules(result, { kbLoaded: kb });
+                    result = finalizeSqlTableNames(result, 'hive');
                 } else if (sourceFormat === SOURCE.DAVINCI && targetFormat === TARGET.CK) {
                     result = davinciReplaceVars(input);
+                    result = finalizeSqlTableNames(result, 'ck');
+                }
+
+                result = fixTripleQualifiedTableNames(result);
+                const tripleIssues = findTripleQualifiedTableIssues(result);
+                if (tripleIssues.length) {
+                    result += '\n\n-- [表名校验] 仍含疑似不规范的「库.库.表」三段限定，请手工核对: ' + tripleIssues.join('; ');
                 }
 
                 document.getElementById('outputCode').value = result;
@@ -585,6 +774,8 @@ Hive→CK：get_json_object → JSONExtract；split(str,',')[n] → splitByChar(
 ${toFormat === 'hive' ? '【转 Hive】严禁使用 parse_datetime、parseDateTimeBestEffort、toDateTime、JSONExtract、splitByChar、match 等 CK 函数。必须用 Hive 的 get_json_object、split、like/rlike、unix_timestamp、from_unixtime、to_date。' : '【转 CK】必须用 CK 的 JSONExtract、splitByChar、match 等，注意数组索引改为 1-based。'}
 
 【GROUP BY】保持 group by 1,2 或改为显式列名，确保与 SELECT 顺序一致。
+
+【表名与库名】命中知识库时严格按知识库表名。表名必须是「库名.表名」两段。未命中时：${toFormat === 'hive' ? 'CK→Hive：① 裸表首个 zdm_ 改为 zdm_hive_（如 ads_zdm_trade_orderproduct→ads_zdm_hive_trade_orderproduct）；② 库名=第一个 zdm 及之前字符（含 zdm），与①结果组合（如 ads_zdm.ads_zdm_hive_trade_orderproduct）。' : 'Hive→CK：表名去 _hive_；库名一律 bi_app。' }
 ${kbPromptSection(sql)}
 请将以下 ${fromName} SQL 完整转换为 ${toName} SQL 格式，只输出转换后的 SQL，不要解释、不要 markdown 代码块。
 
@@ -645,6 +836,15 @@ ${sql}
             s = s.replace(/\b(\w+)\s+>=\s*'(\d{4}-\d{2}-\d{2})'\s+AND\s+\1\s+<=\s*'(\d{4}-\d{2}-\d{2})'/gi,
                 "$1 between $begin_date$ and $end_date$");
 
+            // 1c. 等号单值：dt / order_create_date / statis_date / date = 'YYYY-MM-DD' 或 'YYYY-MM'（先完整日，再月；支持 表别名.字段）
+            const timeEqFields = 'dt|statis_date|order_create_date|date';
+            const eqDay = new RegExp(`\\b(?:(\\w+)\\.)?(${timeEqFields})\\s*=\\s*'(\\d{4}-\\d{2}-\\d{2})'`, 'gi');
+            s = s.replace(eqDay, (m, qual, field) =>
+                (qual ? qual + '.' : '') + field + ' between $begin_date$ and $end_date$');
+            const eqMonth = new RegExp(`\\b(?:(\\w+)\\.)?(${timeEqFields})\\s*=\\s*'(\\d{4}-\\d{2}(?!-\\d{2}))'`, 'gi');
+            s = s.replace(eqMonth, (m, qual, field) =>
+                (qual ? qual + '.' : '') + field + ' between substr($begin_date$,1,7) and substr($end_date$,1,7)');
+
             // 2. 筛选项：替换已有的 in(...) 或 ='...'，或新增变量（字段在 SELECT/GROUP BY 中但 WHERE 无筛选时）
             const filterStr = document.getElementById('filterFields').value.trim();
             if (filterStr) {
@@ -673,23 +873,27 @@ ${sql}
             return s;
         }
 
-        // Hive → CK/达芬奇：库名改 bi_app；未加载知识库时仍做 _hive_ → ads_zdm_ 的通用替换（与知识库冲突时以知识库后处理为准）
-        function hiveToCkTableRules(sql, options = {}) {
+        // Hive → CK/达芬奇：知识库已处理；Hive 库.表 与 bi_app.表 均规范为 bi_app.表（表名去 _hive_）
+        function hiveToCkTableRules(sql) {
             let s = sql;
-            if (!options.kbLoaded) {
-                s = s.replace(/(\w+)_hive_/g, 'ads_zdm_');
-            }
-            s = s.replace(/\b(dwd_zdm|ods_zdm|ads_zdm)\./g, 'bi_app.');
+            const toCk = (bare) => hiveBareToCkBareNoKb(bare);
+            s = s.replace(/\b(?:dwd_zdm|ods_zdm|ads_zdm|dm_zdm)\.([a-zA-Z_][a-zA-Z0-9_]*)\b/g, function (_m, bare) {
+                return 'bi_app.' + toCk(bare);
+            });
+            s = s.replace(/\bbi_app\.([a-zA-Z_][a-zA-Z0-9_]*)\b/g, function (_m, bare) {
+                return 'bi_app.' + toCk(bare);
+            });
             return s;
         }
 
-        // CK/达芬奇 → Hive：库名统一 dwd_zdm；未加载知识库时对 ads_zdm_ 做通用替换
-        function ckToHiveTableRules(sql, options = {}) {
+        // CK → Hive：知识库已处理；其余 bi_app.表 → 未命中时 zdm_ 后加 hive_，再按表名推 Hive 库名
+        function ckToHiveTableRules(sql) {
             let s = sql;
-            s = s.replace(/\bbi_app\./g, 'dwd_zdm.');
-            if (!options.kbLoaded) {
-                s = s.replace(/ads_zdm_/g, 'dwd_zdm_hive_');
-            }
+            s = s.replace(/\bbi_app\.([a-zA-Z_][a-zA-Z0-9_]*)\b/g, function (_m, bare) {
+                const t = ckBareToHiveBareNoKb(bare);
+                const sch = hiveSchemaFromBareTableName(t);
+                return sch + '.' + t;
+            });
             return s;
         }
 
