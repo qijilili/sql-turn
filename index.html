@@ -240,7 +240,16 @@
                 </div>
             </div>
             <p class="hint">Hive 与 CK 互转需调用大模型；达芬奇转换仅对变量做规则处理。通义千问若报 403，请用<strong>主账号</strong>在 <a href="https://dashscope.console.aliyun.com/" target="_blank">DashScope 控制台</a> 创建 API Key，并确保已开通灵积模型服务。</p>
-            <p class="hint" style="color:var(--warning);">若从本地文件打开出现 CORS 报错：在终端执行 <code>cd "/Users/smzdm/Desktop/sql 代码"</code> 进入目录，再执行 <code>python3 -m http.server 8080</code>，然后浏览器访问 <a href="http://localhost:8080/代码格式转换工具.html" target="_blank">http://localhost:8080/代码格式转换工具.html</a></p>
+            <p class="hint" style="color:var(--warning);">若从本地文件打开出现 CORS 报错：在终端执行 <code>cd "/Users/smzdm/Desktop/sql 代码"</code> 进入目录，再执行 <code>python3 -m http.server 8080</code>，然后浏览器访问 <a href="http://localhost:8080/代码格式转换工具.html" target="_blank">http://localhost:8080/代码格式转换工具.html</a>（否则无法自动加载同目录下的表名知识库 CSV）。</p>
+        </div>
+
+        <div class="card">
+            <h2>表名知识库（Hive↔CK）</h2>
+            <p class="hint" style="margin-bottom: 12px;">默认与同目录下 <code>表名称转化的知识库.csv</code>（列：CK表名称, HIVE 表名称）联动。也可上传覆盖。加载后：① 相关行会并入大模型提示；② 转换结束会按知识库再做一轮表名替换；③ 加载知识库时将关闭易改错表的 <code>_hive_</code> 粗暴替换，仅保留库名 dwd/ods/ads → bi_app。</p>
+            <div class="select-row" style="align-items: center;">
+                <input type="file" id="kbCsvFile" accept=".csv,text/csv" onchange="loadKbFromFile(event)" style="color:var(--text-muted);">
+                <span id="kbStatus" class="hint" style="margin:0;">正在尝试加载知识库…</span>
+            </div>
         </div>
 
         <div class="card">
@@ -292,7 +301,7 @@
         <div class="rules">
             <h3>转换规则说明</h3>
             <ul>
-                <li><strong>Hive ↔ CK：</strong> 调用大模型转换（函数差异大，无法枚举）。库名/表名：Hive→CK 时库改 bi_app、表名去 hive 且前缀改 ads_zdm；CK→Hive 时库改 dwd_zdm、表名加 hive 且 ads_zdm 改 dwd_zdm</li>
+                <li><strong>Hive ↔ CK：</strong> 调用大模型转换（函数差异大，无法枚举）。若已加载 <code>表名称转化的知识库.csv</code>，表名以知识库为准并在提示与后处理中生效；未加载时仍用规则：Hive→CK 库改 bi_app、<code>_hive_</code> 段替换；CK→Hive 库改 dwd_zdm、ads_zdm_ 改 dwd_zdm_hive_</li>
                 <li><strong>Hive → 达芬奇：</strong> 先经大模型转为 CK，再应用库表名规则与达芬奇变量规则（时间自动处理，筛选项需填写字段名）</li>
                 <li><strong>CK → 达芬奇：</strong> 仅规则处理。时间条件自动转为 $begin_date$ / $end_date$（月格式用 substr）；筛选项需在上方填写字段名，转为 $if(字段名)$ and 字段名 in($字段名$) $endif$</li>
                 <li><strong>达芬奇 → Hive/CK：</strong> 变量替换为占位符后，若转 Hive 则再调大模型，并应用库表名规则（库改 dwd_zdm、表名加 hive）</li>
@@ -311,6 +320,136 @@
             dashscope: { url: 'https://dashscope.aliyuncs.com/compatible-mode/v1', model: 'qwen-flash', keyHint: '阿里云 DashScope 控制台（需主账号 Key）' },
             ollama: { url: 'http://localhost:11434/v1', model: 'qwen2.5:7b', keyHint: '无需 Key，需先安装 Ollama' }
         };
+
+        /** 表名知识库：列 CK表名称, HIVE 表名称（与 表名称转化的知识库.csv 一致） */
+        const TABLE_KB = { rows: [], loaded: false };
+
+        function updateKbStatus() {
+            const el = document.getElementById('kbStatus');
+            if (!el) return;
+            if (!TABLE_KB.loaded) {
+                el.textContent = '未加载（请用 http.server 打开同目录页面或上传 CSV）';
+                return;
+            }
+            el.textContent = '已加载 ' + TABLE_KB.rows.length + ' 条表名映射';
+        }
+
+        function parseTableKbCsv(text) {
+            TABLE_KB.rows = [];
+            const lines = String(text).replace(/^\uFEFF/, '').split(/\r?\n/);
+            for (let i = 1; i < lines.length; i++) {
+                const line = lines[i];
+                if (!line.trim()) continue;
+                const parts = line.split(',');
+                const ck = (parts[0] || '').trim();
+                const hive = (parts[1] || '').trim();
+                if (!ck || !hive) continue;
+                const dot = hive.indexOf('.');
+                const hiveSchema = dot >= 0 ? hive.slice(0, dot) : '';
+                const hiveBare = dot >= 0 ? hive.slice(dot + 1) : hive;
+                if (!hiveBare) continue;
+                TABLE_KB.rows.push({ ck, hive, hiveSchema, hiveBare });
+            }
+            TABLE_KB.loaded = TABLE_KB.rows.length > 0;
+            updateKbStatus();
+        }
+
+        function loadKbFromFile(ev) {
+            const f = ev.target && ev.target.files && ev.target.files[0];
+            if (!f) return;
+            const reader = new FileReader();
+            reader.onload = () => parseTableKbCsv(reader.result || '');
+            reader.readAsText(f, 'UTF-8');
+        }
+
+        async function initTableKb() {
+            TABLE_KB.rows = [];
+            TABLE_KB.loaded = false;
+            updateKbStatus();
+            try {
+                const res = await fetch(encodeURI('表名称转化的知识库.csv'));
+                if (!res.ok) throw new Error(String(res.status));
+                parseTableKbCsv(await res.text());
+            } catch (e) {
+                TABLE_KB.loaded = false;
+                updateKbStatus();
+            }
+        }
+
+        function kbRowsForSql(sql) {
+            if (!TABLE_KB.rows.length) return [];
+            const lower = sql.toLowerCase();
+            const hit = [];
+            const seen = new Set();
+            for (const r of TABLE_KB.rows) {
+                if (!lower.includes(r.ck.toLowerCase()) && !lower.includes(r.hive.toLowerCase()) && !lower.includes(r.hiveBare.toLowerCase())) continue;
+                const k = r.hive + '\0' + r.ck;
+                if (seen.has(k)) continue;
+                seen.add(k);
+                hit.push(r);
+            }
+            return hit;
+        }
+
+        function kbPromptSection(sql) {
+            const rows = kbRowsForSql(sql);
+            if (!rows.length) return '';
+            const max = 100;
+            const lines = rows.slice(0, max).map(r => r.hive + '\t' + r.ck);
+            let s = '\n【表名映射知识库】以下为当前 SQL 中可能涉及的 HIVE ↔ CK 表名权威对应，转换后的表名须与之一致（含库前缀时以左侧 Hive 全名为准改写为 CK 侧 bi_app 或 dm_zdm）。\n';
+            s += lines.join('\n');
+            if (rows.length > max) s += '\n（命中 ' + rows.length + ' 条，此处最多展示 ' + max + ' 条）';
+            return s;
+        }
+
+        function applyKbHiveToCk(sql) {
+            if (!TABLE_KB.rows.length) return sql;
+            const byBare = new Map();
+            for (const r of TABLE_KB.rows) {
+                byBare.set(r.hiveBare, r);
+            }
+            const ordered = [...byBare.values()].sort((a, b) => b.hiveBare.length - a.hiveBare.length);
+            let s = sql;
+            for (const r of ordered) {
+                const esc = r.hiveBare.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+                const reWare = new RegExp('\\b(?:dwd_zdm|ods_zdm|ads_zdm|bi_app)\\.' + esc + '\\b', 'gi');
+                s = s.replace(reWare, 'bi_app.' + r.ck);
+                const reDm = new RegExp('\\bdm_zdm\\.' + esc + '\\b', 'gi');
+                s = s.replace(reDm, 'dm_zdm.' + r.ck);
+            }
+            return s;
+        }
+
+        function qualifyHiveFromRow(r) {
+            if (r.hive.indexOf('.') >= 0) return r.hive;
+            if (r.ck.indexOf('dm_zdm') === 0) return 'dm_zdm.' + r.hive;
+            return 'dwd_zdm.' + r.hive;
+        }
+
+        function applyKbCkToHive(sql) {
+            if (!TABLE_KB.rows.length) return sql;
+            const byCk = new Map();
+            for (const r of TABLE_KB.rows) {
+                byCk.set(r.ck, r);
+            }
+            const ordered = [...byCk.values()].sort((a, b) => b.ck.length - a.ck.length);
+            let s = sql;
+            for (const r of ordered) {
+                const esc = r.ck.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+                const qual = qualifyHiveFromRow(r);
+                const reps = [
+                    new RegExp('\\bbi_app\\.' + esc + '\\b', 'gi'),
+                    new RegExp('\\bdm_zdm\\.' + esc + '\\b', 'gi'),
+                    new RegExp('\\bdwd_zdm\\.' + esc + '\\b', 'gi'),
+                    new RegExp('\\bods_zdm\\.' + esc + '\\b', 'gi'),
+                    new RegExp('\\bads_zdm\\.' + esc + '\\b', 'gi')
+                ];
+                for (const re of reps) {
+                    s = s.replace(re, qual);
+                }
+            }
+            return s;
+        }
 
         function applyPreset() {
             const v = document.getElementById('apiPreset').value;
@@ -389,25 +528,30 @@
             try {
                 let result = input;
 
+                const kb = TABLE_KB.loaded;
                 if (sourceFormat === SOURCE.HIVE && targetFormat === TARGET.CK) {
                     result = await callLLM(input, 'hive', 'ck');
-                    result = hiveToCkTableRules(result);
+                    result = applyKbHiveToCk(result);
+                    result = hiveToCkTableRules(result, { kbLoaded: kb });
                 } else if (sourceFormat === SOURCE.HIVE && targetFormat === TARGET.DAVINCI) {
                     result = await callLLM(input, 'hive', 'ck');
-                    result = hiveToCkTableRules(result);
+                    result = applyKbHiveToCk(result);
+                    result = hiveToCkTableRules(result, { kbLoaded: kb });
                     result = ckToDavinciRules(result);
                 } else if (sourceFormat === SOURCE.CK && targetFormat === TARGET.HIVE) {
                     result = await callLLM(input, 'ck', 'hive');
                     result = fixHiveCkFunctions(result);
-                    result = ckToHiveTableRules(result);
+                    result = applyKbCkToHive(result);
+                    result = ckToHiveTableRules(result, { kbLoaded: kb });
                 } else if (sourceFormat === SOURCE.CK && targetFormat === TARGET.DAVINCI) {
-                    result = hiveToCkTableRules(input);
+                    result = hiveToCkTableRules(input, { kbLoaded: kb });
                     result = ckToDavinciRules(result);
                 } else if (sourceFormat === SOURCE.DAVINCI && targetFormat === TARGET.HIVE) {
                     result = davinciReplaceVars(input);
                     result = await callLLM(result, 'ck', 'hive');
                     result = fixHiveCkFunctions(result);
-                    result = ckToHiveTableRules(result);
+                    result = applyKbCkToHive(result);
+                    result = ckToHiveTableRules(result, { kbLoaded: kb });
                 } else if (sourceFormat === SOURCE.DAVINCI && targetFormat === TARGET.CK) {
                     result = davinciReplaceVars(input);
                 }
@@ -441,7 +585,7 @@ Hive→CK：get_json_object → JSONExtract；split(str,',')[n] → splitByChar(
 ${toFormat === 'hive' ? '【转 Hive】严禁使用 parse_datetime、parseDateTimeBestEffort、toDateTime、JSONExtract、splitByChar、match 等 CK 函数。必须用 Hive 的 get_json_object、split、like/rlike、unix_timestamp、from_unixtime、to_date。' : '【转 CK】必须用 CK 的 JSONExtract、splitByChar、match 等，注意数组索引改为 1-based。'}
 
 【GROUP BY】保持 group by 1,2 或改为显式列名，确保与 SELECT 顺序一致。
-
+${kbPromptSection(sql)}
 请将以下 ${fromName} SQL 完整转换为 ${toName} SQL 格式，只输出转换后的 SQL，不要解释、不要 markdown 代码块。
 
 输入 SQL：
@@ -529,19 +673,23 @@ ${sql}
             return s;
         }
 
-        // Hive → CK/达芬奇：库名改 bi_app，表名去 hive 且 hive 前改 ads_zdm
-        function hiveToCkTableRules(sql) {
+        // Hive → CK/达芬奇：库名改 bi_app；未加载知识库时仍做 _hive_ → ads_zdm_ 的通用替换（与知识库冲突时以知识库后处理为准）
+        function hiveToCkTableRules(sql, options = {}) {
             let s = sql;
-            s = s.replace(/(\w+)_hive_/g, 'ads_zdm_');
+            if (!options.kbLoaded) {
+                s = s.replace(/(\w+)_hive_/g, 'ads_zdm_');
+            }
             s = s.replace(/\b(dwd_zdm|ods_zdm|ads_zdm)\./g, 'bi_app.');
             return s;
         }
 
-        // CK/达芬奇 → Hive：库名统一 dwd_zdm，表名加 hive 且 ads_zdm 改 dwd_zdm
-        function ckToHiveTableRules(sql) {
+        // CK/达芬奇 → Hive：库名统一 dwd_zdm；未加载知识库时对 ads_zdm_ 做通用替换
+        function ckToHiveTableRules(sql, options = {}) {
             let s = sql;
             s = s.replace(/\bbi_app\./g, 'dwd_zdm.');
-            s = s.replace(/ads_zdm_/g, 'dwd_zdm_hive_');
+            if (!options.kbLoaded) {
+                s = s.replace(/ads_zdm_/g, 'dwd_zdm_hive_');
+            }
             return s;
         }
 
@@ -618,6 +766,7 @@ ${sql}
         toggleFilterFields();
         // 页面加载时应用 DeepSeek 预设
         applyPreset();
+        initTableKb();
     </script>
 </body>
 </html>
